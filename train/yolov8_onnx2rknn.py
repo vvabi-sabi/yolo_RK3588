@@ -1,7 +1,7 @@
 import sys
 from rknn.api import RKNN
 
-model_name = 'yolov8'
+model_name = 'yolov8_batch'
 
 DEFAULT_RKNN_PATH = f'./models/{model_name}.rknn'
 DEFAULT_QUANT = False
@@ -15,8 +15,9 @@ if __name__ == '__main__':
 
     # Pre-process config
     print('--> Config model')
-    rknn.config(mean_values=[[0, 0, 0]], std_values=[
-                    [255, 255, 255]], target_platform=platform)
+    rknn.config(mean_values=[[0, 0, 0]],
+                std_values=[[255, 255, 255]],
+                target_platform=platform)
     print('done')
 
     # Load model
@@ -29,7 +30,7 @@ if __name__ == '__main__':
 
     # Build model
     print('--> Building model')
-    ret = rknn.build(do_quantization=do_quant) #, dataset=DATASET_PATH)
+    ret = rknn.build(do_quantization=False)
     if ret != 0:
         print('Build model failed!')
         exit(ret)
