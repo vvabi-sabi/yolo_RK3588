@@ -1,14 +1,9 @@
-import time
-from itertools import product
-import math
-from math import sqrt
+import torch
 import cv2
 import numpy as np
-import onnxruntime
+from py_utils.coco_utils import COCO_test_helper
 from multiprocessing import Process, Queue
 
-from utils.box_utils import nms_numpy, after_nms_numpy
-from utils.metrics_utils import APDataObject, prep_metrics
 
 MASK_SHAPE = (138, 138, 3)
 
@@ -29,7 +24,7 @@ COLORS = np.array([[0, 0, 0], [244, 67, 54], [233, 30, 99], [156, 39, 176], [103
                    [255, 155, 0], [155, 255, 0], [0, 155, 255], [0, 255, 155], [18, 5, 40],
                    [120, 120, 255], [255, 58, 30], [60, 45, 60], [75, 27, 244], [128, 25, 70]], dtype='uint8')
 
-COCO_CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
+CLASSES = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
                 'train', 'truck', 'boat', 'traffic light', 'fire hydrant',
                 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog',
                 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe',
@@ -131,24 +126,8 @@ class RKNNDetection(Detection):
     def __init__(self, input, cfg):
         super().__init__(input)
         self.input_size = cfg['input_size']
-        self.conf_threshold = cfg['conf_threshold']
-        self.iou_threshold = cfg['iou_threshold']
-    
-    def filter_boxes(
-        self,
-        boxes: np.ndarray,
-        box_confidences: np.ndarray,
-        box_class_probs: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Filter boxes with object threshold."""
-        box_confidences = box_confidences.flatten()
-        class_max_score = np.max(box_class_probs, axis=-1)
-        classes = np.argmax(box_class_probs, axis=-1)
-
-        scores = class_max_score * box_confidences
-        mask = scores >= self.conf_threshold
-
-        return boxes[mask], classes[mask], scores[mask]
+        self.obj_threshold = cfg['obj_threshold']
+        self.nms_threshold = cfg['nms_threshold']
 
     def dfl(self, position: np.ndarray) -> np.ndarray:
         n, c, h, w = position.shape
@@ -184,86 +163,49 @@ class RKNNDetection(Detection):
         -------
         
         '''
+        max_det, nc = 300, len(CLASSES)
+
+        boxes, scores = [], []
+        defualt_branch=3
+        pair_per_branch = len(inputs)//defualt_branch
+        # Python 忽略 score_sum 输出
+        for i in range(defualt_branch):
+            boxes.append(self.box_process(inputs[pair_per_branch*i]))
+            scores.append(inputs[pair_per_branch*i+1])
+
         def sp_flatten(_in):
             ch = _in.shape[1]
-            return _in.transpose(0, 2, 3, 1).reshape(-1, ch)
+            _in = _in.transpose(0,2,3,1)
+            return _in.reshape(-1, ch)
 
-        def add_offset(boxes):
-            n_boxes = boxes.shape[0]
-            step_ind = n_boxes//6
-            x_offset = 640
-            y_offset = 540
-            #boxes[0][:,0] # first crop have not offset
-            boxes[1*step_ind:2*step_ind,0] += x_offset # second crop have x_offset only
-            boxes[1*step_ind:2*step_ind,2] += x_offset # second crop have x_offset only
-            boxes[2*step_ind:3*step_ind,0] += 2*x_offset # third crop have x_offset only
-            boxes[2*step_ind:3*step_ind,2] += 2*x_offset # third crop have x_offset only
-            boxes[3*step_ind:4*step_ind,1] += y_offset #  crop have y_offset only
-            boxes[3*step_ind:4*step_ind,3] += y_offset #  crop have y_offset only
-            boxes[4*step_ind:5*step_ind,0] += x_offset #  crop have x_ and y_offset 
-            boxes[4*step_ind:5*step_ind,2] += x_offset # crop have x_ and y_offset
-            boxes[4*step_ind:5*step_ind,1] += y_offset #  crop have x_ and y_offset 
-            boxes[4*step_ind:5*step_ind,3] += y_offset # crop have x_ and y_offset 
-            boxes[5*step_ind:,0] += 2*x_offset #  crop have x_ and y_offset 
-            boxes[5*step_ind:,2] += 2*x_offset # crop have x_ and y_offset
-            boxes[5*step_ind:,1] += y_offset #  crop have x_ and y_offset 
-            boxes[5*step_ind:,3] += y_offset # crop have x_ and y_offset
-            return boxes
+        boxes = [sp_flatten(_v) for _v in boxes]
+        scores = [sp_flatten(_v) for _v in scores]
 
-        defualt_branch = 3
-        pair_per_branch = len(inputs) // defualt_branch
+        boxes = torch.from_numpy(np.expand_dims(np.concatenate(boxes), axis=0))
+        scores = torch.from_numpy(np.expand_dims(np.concatenate(scores), axis=0))
 
-        boxes, classes_conf, scores = [], [], []
-        for i in range(defualt_branch):
-            boxes.append(self.box_process(inputs[pair_per_branch * i]))
-            classes_conf.append(sp_flatten(inputs[pair_per_branch * i + 1]))
-            scores.append(np.ones_like(classes_conf[-1][:, :1], dtype=np.float32))
+        max_scores = scores.amax(dim=-1)
+        max_scores, index = torch.topk(max_scores, max_det, axis=-1)
+        index = index.unsqueeze(-1)
+        boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
+        scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
 
-        boxes = [sp_flatten(b) for b in boxes]
-        boxes = [add_offset(b) for b in boxes]
-        boxes = np.concatenate(boxes)
-        classes_conf = np.concatenate(classes_conf)
-        scores = np.concatenate(scores).flatten()
+        scores, index = torch.topk(scores.flatten(1), max_det, axis=-1)
+        labels = index % nc
+        index = index // nc
+        boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
 
-        boxes, classes, scores = self.filter_boxes(boxes, scores, classes_conf)
-        indices = cv2.dnn.NMSBoxes(
-            boxes.tolist(), scores.tolist(), self.conf_threshold, self.iou_threshold
-        )
-        if isinstance(indices, tuple):
-            return None, None, None
+        preds = torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1)], dim=-1)
 
-        boxes = boxes[indices]
-        classes = classes[indices]
-        scores = scores[indices]
+        mask = preds[..., 4] > self.obj_threshold
+
+        preds = [p[mask[idx]] for idx, p in enumerate(preds)][0]
+        boxes = preds[..., :4].numpy()
+        scores =  preds[..., 4].numpy()
+        classes = preds[..., 5].numpy().astype(np.int64)
 
         return boxes, classes, scores
     
-    def prep_display(self, results):
-        boxes, indices, confidences = results
-        ids_p = []
-        class_p = []
-        box_p = []
-        
-        for i in indices:
-            x_center, y_center, w, h = boxes[i]
-            x1 = int((x_center - w / 2))
-            y1 = int((y_center - h / 2))
-            x2 = int((x_center + w / 2))
-            y2 = int((y_center + h / 2))
-            conf = confidences[i]
-            
-            # Create dummy data for missing parameters
-            ids_p.append(0)  # Class ID (0 for 'first')
-            class_p.append(conf)  # Confidence score
-            box_p.append([x1, y1, x2, y2])  # Bounding box
-        
-        # Create dummy masks (since we're doing detection, not segmentation)        
-        return (
-            np.array(ids_p), 
-            np.array(class_p), 
-            np.array(box_p), 
-        )
-
 
 class PostProcess():
     """Class to handle post-processing of yolact inference results.
@@ -313,32 +255,15 @@ class Visualizer():
         """
         Save the given frame on the screen with bounding boxes
         """
-        # Remove batch dimension if present
-        if frame.ndim == 4 and frame.shape[0] == 1:
-            frame = frame[0]
-            
-        if frame is None:
-            return
-        
-        dwdh = (2, 2)
-        ratio = 1
-        # Convert to BGR for OpenCV
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        # Unpack outputs
-        boxes, classes, scores = out
-        if all(x is not None for x in (boxes, classes, scores)):
-             boxes -= np.array(dwdh * 2)
-             boxes /= ratio
-             boxes = boxes.round().astype(np.int32)
-        
-        # Draw bounding boxes
+        co_helper = COCO_test_helper(enable_letter_box=True)
+        boxes, scores, classes = out
+        boxes = co_helper.get_real_box(boxes)
+
         for box, score, cl in zip(boxes, scores, classes):
-            top, left, right, bottom = map(int, box)
-            cv2.rectangle(img=frame, pt1=(top, left), pt2=(right, bottom), color=(255, 0, 0),
-                          thickness=2,)
-            text_str = f"{CASTOM_CLASSES[cl]} {score:.2f}"
-            cv2.putText(img=frame, text=text_str, org=(top, left - 6),
-                        fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.6, color=(0, 0, 255), thickness=2,)
-        
-        cv2.imshow('Yolo_v8 Inference', frame)
+            top, left, right, bottom = [int(_b) for _b in box]
+            print("%s @ (%d %d %d %d) %.3f" % (CLASSES[cl], top, left, right, bottom, score))
+            cv2.rectangle(frame, (top, left), (right, bottom), (255, 0, 0), 2)
+            cv2.putText(frame, '{0} {1:.2f}'.format(CLASSES[cl], score),
+                        (top, left - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)        
+        cv2.imshow('Yolo_v10 Inference', frame)
         cv2.waitKey(1)

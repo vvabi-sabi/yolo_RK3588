@@ -5,8 +5,8 @@ from base import Camera, RK3588
 
 
 rknn_postprocess_cfg = {'img_size' : 640,
-                        'conf_threshold' : 0.5,
-                        'iou_threshold' : 0.5,
+                        'obj_threshold' : 0.25,
+                        'nms_threshold' : 0.45,
                     }
 
 
