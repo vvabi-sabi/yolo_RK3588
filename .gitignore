@@ -9,4 +9,4 @@ __pycache__
 # models
 *.rknn
 *.onnx
-!models/yolo_v8.rknn
+!models/yolov8n_batch.rknn
