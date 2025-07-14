@@ -6,7 +6,7 @@ ROOT = Path(__file__).parent.parent.parent.absolute()
 MODELS_PATH = str(ROOT) + "/yolo_RK3588/models/"
 
 
-RKNNModelNames = {'yolov10':'yolov10.rknn',
+RKNNModelNames = {'yolo11':'yolo11n.rknn',
                  }
 
 def get_model_names(model_list):

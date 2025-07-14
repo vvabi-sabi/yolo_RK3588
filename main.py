@@ -26,7 +26,7 @@ def main(source):
     POST_ONNX = False
     queue_size = 5
     q_pre = Queue(maxsize=queue_size)
-    model = 'yolov10'
+    model = 'yolo11'
     camera = Camera(source=source,
                     queue=q_pre,
                     onnx=POST_ONNX)
