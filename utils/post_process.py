@@ -282,7 +282,7 @@ class PostProcess():
         
     """
     
-    def __init__(self, queue, cfg:None, onnx:True):
+    def __init__(self, queue, cfg:None):
         """
         Parameters
         ----------
