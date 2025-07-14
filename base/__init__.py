@@ -1,2 +1,2 @@
 from .camera import Camera
-from .firefly import RK3588
+from .device import RK3588
