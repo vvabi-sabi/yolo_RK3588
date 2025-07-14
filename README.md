@@ -1,4 +1,4 @@
-# yolov10_RK3588
+# yolo11_RK3588
 
 ## Install
 Install miniconda
@@ -25,5 +25,6 @@ pip install rknn_toolkit_lite2-1.4.0-cp39-cp39-linux_aarch64.whl
 ```
 git clone https://github.com/vvabi-sabi/yolact_RK3588.git
 cd yolo_RK3588
+git checkout yolo11
 python main.py
 ```
