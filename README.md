@@ -1,4 +1,4 @@
-# yolv8_RK3588
+# yolov8_RK3588
 
 ## Install
 Install miniconda
