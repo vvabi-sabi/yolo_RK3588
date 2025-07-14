@@ -9,6 +9,4 @@ __pycache__
 # models
 *.rknn
 *.onnx
-!models/yolact_544.rknn
-!models/yolact_550.rknn
-!utils/postprocess_550x550.onnx
+!models/yolo_v8.rknn
