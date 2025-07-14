@@ -130,7 +130,7 @@ class RKNNDetection(Detection):
 
     def __init__(self, input, cfg):
         super().__init__(input)
-        self.input_size = cfg['input_size']
+        self.input_size = cfg['img_size']
         self.conf_threshold = cfg['conf_threshold']
         self.iou_threshold = cfg['iou_threshold']
     
