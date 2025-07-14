@@ -188,6 +188,28 @@ class RKNNDetection(Detection):
             ch = _in.shape[1]
             return _in.transpose(0, 2, 3, 1).reshape(-1, ch)
 
+        def add_offset(boxes):
+            n_boxes = boxes.shape[0]
+            step_ind = n_boxes//6
+            x_offset = 640
+            y_offset = 540
+            #boxes[0][:,0] # first crop have not offset
+            boxes[1*step_ind:2*step_ind,0] += x_offset # second crop have x_offset only
+            boxes[1*step_ind:2*step_ind,2] += x_offset # second crop have x_offset only
+            boxes[2*step_ind:3*step_ind,0] += 2*x_offset # third crop have x_offset only
+            boxes[2*step_ind:3*step_ind,2] += 2*x_offset # third crop have x_offset only
+            boxes[3*step_ind:4*step_ind,1] += y_offset #  crop have y_offset only
+            boxes[3*step_ind:4*step_ind,3] += y_offset #  crop have y_offset only
+            boxes[4*step_ind:5*step_ind,0] += x_offset #  crop have x_ and y_offset 
+            boxes[4*step_ind:5*step_ind,2] += x_offset # crop have x_ and y_offset
+            boxes[4*step_ind:5*step_ind,1] += y_offset #  crop have x_ and y_offset 
+            boxes[4*step_ind:5*step_ind,3] += y_offset # crop have x_ and y_offset 
+            boxes[5*step_ind:,0] += 2*x_offset #  crop have x_ and y_offset 
+            boxes[5*step_ind:,2] += 2*x_offset # crop have x_ and y_offset
+            boxes[5*step_ind:,1] += y_offset #  crop have x_ and y_offset 
+            boxes[5*step_ind:,3] += y_offset # crop have x_ and y_offset
+            return boxes
+
         defualt_branch = 3
         pair_per_branch = len(inputs) // defualt_branch
 
@@ -197,13 +219,13 @@ class RKNNDetection(Detection):
             classes_conf.append(sp_flatten(inputs[pair_per_branch * i + 1]))
             scores.append(np.ones_like(classes_conf[-1][:, :1], dtype=np.float32))
 
-        boxes = np.concatenate([sp_flatten(b) for b in boxes])
+        boxes = [sp_flatten(b) for b in boxes]
+        boxes = [add_offset(b) for b in boxes]
+        boxes = np.concatenate(boxes)
         classes_conf = np.concatenate(classes_conf)
         scores = np.concatenate(scores).flatten()
 
         boxes, classes, scores = self.filter_boxes(boxes, scores, classes_conf)
-        boxes, classes, scores = self.size_filter(boxes, classes, scores)
-
         indices = cv2.dnn.NMSBoxes(
             boxes.tolist(), scores.tolist(), self.conf_threshold, self.iou_threshold
         )
