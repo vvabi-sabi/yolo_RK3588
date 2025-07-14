@@ -1,7 +1,7 @@
 import sys
 from rknn.api import RKNN
 
-model_name = 'yolov8_batch'
+model_name = 'yolov10n'
 
 DEFAULT_RKNN_PATH = f'./models/{model_name}.rknn'
 DEFAULT_QUANT = False
