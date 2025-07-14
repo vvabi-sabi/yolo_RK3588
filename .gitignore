@@ -9,4 +9,4 @@ __pycache__
 # models
 *.rknn
 *.onnx
-!models/yolov10n.rknn
+!models/yolo11n.rknn
