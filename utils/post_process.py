@@ -87,9 +87,8 @@ class Detection(Process):
     def run(self):
         while True:
             frame, inputs = self.input.get()
-            inputs = self.permute(inputs)
             results = self.detect(inputs)
-            self.q_out.put((frame, self.prep_display(results)))
+            self.q_out.put((frame, results))
     
     def permute(self, net_outputs):
         '''implementation dependent'''
@@ -102,96 +101,6 @@ class Detection(Process):
     def prep_display(self, results):
         '''implementation dependent'''
         pass
-
-
-class ONNXDetection(Detection):
-    """This class is a subclass of the Detection class and implements ONNX-based object detection.
-    
-    Attributes
-    ----------
-    input_size : int
-        The size of the input frame.
-    onnx_postprocess : str
-        Path to onnx model
-    session : onnxruntime.InferenceSession
-        Constructs an InferenceSession from a model data (in byte array).
-    threshold : int
-        Detections with a score under this threshold will not be considered.
-
-    Methods
-    -------
-    __init__(input, cfg)
-        Initializes the ONNXDetection algorithm by creating an InferenceSession
-    permute(net_outputs)
-        Transposes the arrays in onnx_inputs to have a specific shape and returns 
-        the permuted and transposed onnx_inputs.
-    detect(onnx_inputs)
-        Runs the ONNX session with the given onnx_inputs and returns the outputs of the session.
-    prep_display(results)
-        Extracts bounding box, score, and class ID from each result. Applies a threshold 
-        to filter out low scores.
-    
-    """
-
-    def __init__(self, input, cfg):
-        super().__init__(input, cfg)
-        self.input_size = 550
-        self.onnx_postprocess = "utils/postprocess_550x550.onnx"
-        self.session = onnxruntime.InferenceSession(self.onnx_postprocess,
-                                                    None) # providers=OrtSessionOptionsAppendExecutionProvider_RKNPU
-        self.threshold = 0.1
-    
-    def permute(self, net_outputs):
-        '''
-        Returns
-        -------
-        post_loc, post_score, post_proto, post_masks
-        '''
-        onnx_inputs = [net_outputs[0][0], net_outputs[2][0], net_outputs[3], net_outputs[1][0]]
-        onnx_inputs[0] = np.transpose(onnx_inputs[0], (2,0,1))
-        onnx_inputs[1] = np.transpose(onnx_inputs[1], (2,0,1))
-        onnx_inputs[3] = np.transpose(onnx_inputs[3], (2,0,1))
-        return onnx_inputs
-    
-    def detect(self, onnx_inputs):
-        '''
-        Returns
-        -------
-        x1y1x2y2_score_class, final_masks
-        '''
-        results = self.session.run(None, {self.session.get_inputs()[0].name: onnx_inputs[0],
-                                          self.session.get_inputs()[1].name: onnx_inputs[1],
-                                          self.session.get_inputs()[2].name: onnx_inputs[2],
-                                          self.session.get_inputs()[3].name: onnx_inputs[3]})
-        return results
-    
-    def prep_display(self, results):
-        def crop(bbox, shape):
-            x1 = max(int(bbox[0] * shape[1]), 0)
-            y1 = max(int(bbox[1] * shape[0]), 0)
-            x2 = max(int(bbox[2] * shape[1]), 0)
-            y2 = max(int(bbox[3] * shape[0]), 0)
-            return (slice(y1, y2), slice(x1, x2))
-        
-        bboxes, scores, class_ids, masks = [], [], [], []
-        
-        for result, mask in zip(results[0][0], results[1]):
-            bbox = result[:4].tolist()
-            score = result[4]
-            class_id = int(result[5])
-            
-            if self.threshold <= score:
-                mask = np.where(mask > 0.5, class_id + 1, 0).astype(np.uint8)
-                region = crop(bbox, mask.shape)
-                cropped = np.zeros(mask.shape, dtype=np.uint8)
-                cropped[region] = mask[region]
-
-                bboxes.append(bbox)
-                class_ids.append(class_id)
-                scores.append(score)
-                masks.append(cropped)
-        
-        return class_ids, scores, bboxes, masks
 
 
 class RKNNDetection(Detection):
@@ -220,41 +129,118 @@ class RKNNDetection(Detection):
     """
 
     def __init__(self, input, cfg):
-        super().__init__(input, cfg)
-        self.input_size = 544
-        self.anchors = []
-        fpn_fm_shape = [math.ceil(self.input_size / stride) for stride in (8, 16, 32, 64, 128)]
-        for i, size in enumerate(fpn_fm_shape):
-            self.anchors += make_anchors(self.cfg, size, size, self.cfg['scales'][i])
+        super().__init__(input)
+        self.input_size = cfg['input_size']
+        self.conf_threshold = cfg['conf_threshold']
+        self.iou_threshold = cfg['iou_threshold']
     
-    def permute(self, net_outputs):
-        '''
-        Returns
-        -------
-        class_p, box_p, coef_p, proto_p
-        '''
-        class_p, box_p, coef_p, proto_p = net_outputs
-        class_p = class_p[0]
-        box_p = box_p[0]
-        coef_p = coef_p[0]
-        class_p = np_softmax(class_p)
-        return class_p, box_p, coef_p, proto_p
-    
+    def filter_boxes(
+        self,
+        boxes: np.ndarray,
+        box_confidences: np.ndarray,
+        box_class_probs: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Filter boxes with object threshold."""
+        box_confidences = box_confidences.flatten()
+        class_max_score = np.max(box_class_probs, axis=-1)
+        classes = np.argmax(box_class_probs, axis=-1)
+
+        scores = class_max_score * box_confidences
+        mask = scores >= self.conf_threshold
+
+        return boxes[mask], classes[mask], scores[mask]
+
+    def dfl(self, position: np.ndarray) -> np.ndarray:
+        n, c, h, w = position.shape
+        p_num = 4
+        mc = c // p_num
+        y = position.reshape(n, p_num, mc, h, w)
+
+        exp_y = np.exp(y)
+        y = exp_y / np.sum(exp_y, axis=2, keepdims=True)
+
+        acc_metrix = np.arange(mc).reshape(1, 1, mc, 1, 1).astype(float)
+        return np.sum(y * acc_metrix, axis=2)
+
+    def box_process(self, position: np.ndarray) -> np.ndarray:
+        grid_h, grid_w = position.shape[2:4]
+        col, row = np.meshgrid(np.arange(grid_w), np.arange(grid_h))
+        grid = np.stack((col, row), axis=0).reshape(1, 2, grid_h, grid_w)
+        stride = np.array([self.input_size // grid_h, self.input_size // grid_w]).reshape(
+            1, 2, 1, 1
+        )
+
+        position = self.dfl(position)
+        box_xy = grid + 0.5 - position[:, 0:2, :, :]
+        box_xy2 = grid + 0.5 + position[:, 2:4, :, :]
+        xyxy = np.concatenate((box_xy * stride, box_xy2 * stride), axis=1)
+
+        return xyxy
+
     def detect(self, inputs):
         '''
-        Returns
+        Inputs (boxes_classes_ scores Tensor)
+        Returns (boxes, classes, scores) | (None, None, None)
         -------
-        class_ids, class_thre, box_thre, coef_thre, proto_p
+        
         '''
-        return nms_numpy(*inputs, anchors=self.anchors, cfg=self.cfg)
+        def sp_flatten(_in):
+            ch = _in.shape[1]
+            return _in.transpose(0, 2, 3, 1).reshape(-1, ch)
+
+        defualt_branch = 3
+        pair_per_branch = len(inputs) // defualt_branch
+
+        boxes, classes_conf, scores = [], [], []
+        for i in range(defualt_branch):
+            boxes.append(self.box_process(inputs[pair_per_branch * i]))
+            classes_conf.append(sp_flatten(inputs[pair_per_branch * i + 1]))
+            scores.append(np.ones_like(classes_conf[-1][:, :1], dtype=np.float32))
+
+        boxes = np.concatenate([sp_flatten(b) for b in boxes])
+        classes_conf = np.concatenate(classes_conf)
+        scores = np.concatenate(scores).flatten()
+
+        boxes, classes, scores = self.filter_boxes(boxes, scores, classes_conf)
+        boxes, classes, scores = self.size_filter(boxes, classes, scores)
+
+        indices = cv2.dnn.NMSBoxes(
+            boxes.tolist(), scores.tolist(), self.conf_threshold, self.iou_threshold
+        )
+        if isinstance(indices, tuple):
+            return None, None, None
+
+        boxes = boxes[indices]
+        classes = classes[indices]
+        scores = scores[indices]
+
+        return boxes, classes, scores
     
     def prep_display(self, results):
-        '''
-        Returns
-        -------
-        ids_p, class_p, box_p, masks
-        '''
-        return after_nms_numpy(*results, self.input_size, self.input_size, self.cfg)
+        boxes, indices, confidences = results
+        ids_p = []
+        class_p = []
+        box_p = []
+        
+        for i in indices:
+            x_center, y_center, w, h = boxes[i]
+            x1 = int((x_center - w / 2))
+            y1 = int((y_center - h / 2))
+            x2 = int((x_center + w / 2))
+            y2 = int((y_center + h / 2))
+            conf = confidences[i]
+            
+            # Create dummy data for missing parameters
+            ids_p.append(0)  # Class ID (0 for 'first')
+            class_p.append(conf)  # Confidence score
+            box_p.append([x1, y1, x2, y2])  # Bounding box
+        
+        # Create dummy masks (since we're doing detection, not segmentation)        
+        return (
+            np.array(ids_p), 
+            np.array(class_p), 
+            np.array(box_p), 
+        )
 
 
 class PostProcess():
@@ -287,10 +273,7 @@ class PostProcess():
         onnx : bool
             Flag indicating whether to use ONNXDetection or RKNNDetection. Default is True.
         """
-        if onnx:
-            self.detection = ONNXDetection(queue, cfg)
-        else:
-            self.detection = RKNNDetection(queue, cfg)
+        self.detection = RKNNDetection(queue, cfg)
     
     def run(self):
         self.detection.start()
@@ -299,191 +282,41 @@ class PostProcess():
         return self.detection.q_out.get()
 
 
-def make_anchors(cfg, conv_h, conv_w, scale):
-    prior_data = []
-    # Iteration order is important (it has to sync up with the convout)
-    for j, i in product(range(conv_h), range(conv_w)):
-        # + 0.5 because priors are in center
-        x = (i + 0.5) / conv_w
-        y = (j + 0.5) / conv_h
-
-        for ar in cfg['aspect_ratios']:
-            ar_sqrt = sqrt(ar)
-            w = scale * ar_sqrt / cfg['img_size']
-            h = scale / ar_sqrt / cfg['img_size']
-
-            prior_data.extend([x, y, w, h])
-
-    return prior_data
-
-def np_softmax(x):
-    np_max = np.max(x, axis=1)
-    sft_max = []
-    for idx, pred in enumerate(x):
-        e_x = np.exp(pred - np_max[idx])
-        sft_max.append(e_x / e_x.sum())
-    sft_max = np.array(sft_max)
-    return sft_max
-
-
 class Visualizer():
     
-    def __init__(self, onnx=True):
-        if onnx:
-            self.draw = onnx_draw
-        else:
-            self.draw = rknn_draw
+    def __init__(self):
+        pass
 
     def show_results(self, frame, out):
         """
-        Show the given frame on the screen with the specified output.
+        Save the given frame on the screen with bounding boxes
         """
+        # Remove batch dimension if present
+        if frame.ndim == 4 and frame.shape[0] == 1:
+            frame = frame[0]
+            
+        if frame is None:
+            return
+        
+        dwdh = (2, 2)
+        ratio = 1
+        # Convert to BGR for OpenCV
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        frame, _ = self.draw(frame, *out)
-        cv2.imshow('Yolact Inference', frame)
+        # Unpack outputs
+        boxes, classes, scores = out
+        if all(x is not None for x in (boxes, classes, scores)):
+             boxes -= np.array(dwdh * 2)
+             boxes /= ratio
+             boxes = boxes.round().astype(np.int32)
+        
+        # Draw bounding boxes
+        for box, score, cl in zip(boxes, scores, classes):
+            top, left, right, bottom = map(int, box)
+            cv2.rectangle(img=frame, pt1=(top, left), pt2=(right, bottom), color=(255, 0, 0),
+                          thickness=2,)
+            text_str = f"{CASTOM_CLASSES[cl]} {score:.2f}"
+            cv2.putText(img=frame, text=text_str, org=(top, left - 6),
+                        fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.6, color=(0, 0, 255), thickness=2,)
+        
+        cv2.imshow('Yolo_v8 Inference', frame)
         cv2.waitKey(1)
-    
-    def show_evaluate(self, frame, out, gt_mask, evaluate_results):
-        """
-        Show the given frame on the screen with the masks and evaluate results.
-        """
-        accuracy, precision, recall = evaluate_results
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        frame, mask = self.draw(frame, *out)
-        mask = cv2.addWeighted(mask, 0.4, gt_mask, 0.6, gamma=0)
-        mask = add_eval_data(mask, np.round(accuracy, 3), np.round(precision, 3), np.round(recall,3))
-        cv2.imshow('Yolact Inference', frame)
-        cv2.imshow('Masks', mask)
-        #cv2.imshow('Ground Truth', gt_mask)
-        cv2.waitKey(1)
-
-
-def onnx_draw(frame, class_ids, scores, bboxes, masks):
-    """
-    Draw bounding boxes, scores, and masks on a given frame.
-
-    Returns
-    -------
-    frame : np.ndarray
-        The frame with bounding boxes, scores, and masks drawn on it.
-    """
-    colors = get_colors(len(COCO_CLASSES))
-    frame_height, frame_width = frame.shape[0], frame.shape[1]
-    # Draw masks
-    if len(masks) > 0:
-        mask_image = np.zeros(MASK_SHAPE, dtype=np.uint8)
-        for mask in masks:
-            color_mask = np.array(colors, dtype=np.uint8)[mask]
-            filled = np.nonzero(mask)
-            mask_image[filled] = color_mask[filled]
-        mask_image = cv2.resize(mask_image, (frame_width, frame_height), cv2.INTER_NEAREST)
-        cv2.addWeighted(frame, 0.5, mask_image, 0.5, 0.0, frame)
-
-    # Draw boxes
-    for bbox, score, class_id in zip(bboxes, scores, class_ids):
-        x1, y1 = int(bbox[0] * frame_width), int(bbox[1] * frame_height)
-        x2, y2 = int(bbox[2] * frame_width), int(bbox[3] * frame_height)
-        color = colors[class_id + 1]
-        frame = draw_box(frame, (x1, y1, x2, y2), color, class_id, score)
-    return frame, mask_image
-
-
-def rknn_draw(img_origin, ids_p, class_p, box_p, mask_p, cfg=None, fps=None):
-    """
-    Generates an image with bounding boxes and labels for detected objects.
-
-    Returns
-    -------
-    frame : numpy.ndarray
-        The image with bounding boxes, masks and labels.
-    """
-    real_time = False
-    if ids_p is None:
-        return img_origin
-
-    num_detected = ids_p.shape[0]
-
-    img_fused = img_origin
-    masks_semantic = mask_p * (ids_p[:, None, None] + 1)  # expand ids_p' shape for broadcasting
-    # The color of the overlap area is different because of the '%' operation.
-    masks_semantic = masks_semantic.astype('int').sum(axis=0) % (len(COCO_CLASSES))
-    color_masks = COLORS[masks_semantic].astype('uint8')
-    img_fused = cv2.addWeighted(color_masks, 0.4, img_origin, 0.6, gamma=0)
-
-    scale = 0.6
-    thickness = 1
-    font = cv2.FONT_HERSHEY_DUPLEX
-
-    for i in reversed(range(num_detected)):
-        color = COLORS[ids_p[i] + 1].tolist()
-        img_fused = draw_box(img_fused, box_p[i, :], color, ids_p[i], class_p[i])
-
-    if real_time:
-        fps_str = f'fps: {fps:.2f}'
-        text_w, text_h = cv2.getTextSize(fps_str, font, scale, thickness)[0]
-        # Create a shadow to show the fps more clearly
-        img_fused = img_fused.astype(np.float32)
-        img_fused[0:text_h + 8, 0:text_w + 8] *= 0.6
-        img_fused = img_fused.astype(np.uint8)
-        cv2.putText(img_fused, fps_str, (0, text_h + 2), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-
-    return img_fused, color_masks
-
-
-def draw_gt(gt_masks):
-    masks_semantic = gt_masks.astype('int').sum(axis=0) % (len(COCO_CLASSES))
-    colors = get_colors(len(COCO_CLASSES))
-    colors = np.array(colors, dtype=np.uint8)
-    color_masks = colors[masks_semantic].astype('uint8')
-    return color_masks
-
-def draw_box(frame, box, color, class_id, score):
-    hide_score = False
-    scale = 0.6
-    thickness = 1
-    font = cv2.FONT_HERSHEY_DUPLEX
-
-    x1, y1, x2, y2 = box
-    class_name = COCO_CLASSES[class_id]
-    
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-    text_str = f'{class_name}: {score:.2f}' if not hide_score else class_name
-    text_w, text_h = cv2.getTextSize(text_str, font, scale, thickness)[0]
-    cv2.rectangle(frame, (x1, y1), (x1 + text_w, y1 + text_h + 5), color, -1)
-    cv2.putText(frame, text_str, (x1, y1 + 15), font, scale,
-                (255, 255, 255), thickness, cv2.LINE_AA)
-    return frame
-
-def get_colors(num):
-    colors = [[0, 0, 0]]
-    np.random.seed(0)
-    for _ in range(num):
-        color = np.random.randint(0, 256, [3]).astype(np.uint8)
-        colors.append(color.tolist())
-    return colors
-
-
-iou_thres = [x / 100 for x in range(5, 50, 5)]
-def evaluate(outputs, ground_truth):
-    gt, gt_masks, img_h, img_w = ground_truth
-    ap_data = {'box': [[APDataObject() for _ in COCO_CLASSES] for _ in iou_thres],
-               'mask': [[APDataObject() for _ in COCO_CLASSES] for _ in iou_thres]}
-    
-    ids_p, class_p, boxes_p, masks_p = outputs
-    ap_obj = ap_data['box'][0][0]
-    prep_metrics(ap_data, ids_p, class_p, boxes_p, masks_p, gt, gt_masks, img_h, img_w, iou_thres)
-    accuracy, precision, recall = ap_obj.get_accuracy()
-    gt_mask = draw_gt(gt_masks)
-    return gt_mask, (accuracy, precision, recall)
-
-def add_eval_data(frame, accuracy, precision, recall):
-    text_acc = f"accuracy {accuracy}"
-    text_pre = f"precision {precision}"
-    text_rec = f"recall {recall}"
-    cv2.putText(frame, text_acc, (15, 25), cv2.FONT_HERSHEY_DUPLEX, 0.6,
-                (255, 125, 255), 1, cv2.LINE_AA)
-    cv2.putText(frame, text_pre, (15, 50), cv2.FONT_HERSHEY_DUPLEX, 0.6,
-                (255, 125, 255), 1, cv2.LINE_AA)
-    cv2.putText(frame, text_rec, (15, 75), cv2.FONT_HERSHEY_DUPLEX, 0.6,
-                (255, 125, 255), 1, cv2.LINE_AA)
-    return frame
