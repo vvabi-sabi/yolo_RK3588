@@ -1,2 +1,2 @@
-from .camera import Camera, DataLoader
+from .camera import Camera
 from .device import RK3588
