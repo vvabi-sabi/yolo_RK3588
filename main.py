@@ -23,18 +23,17 @@ def run(device, visualizer, post_process):
 def main(source):
     """
     """
-    POST_ONNX = False
     queue_size = 5
     q_pre = Queue(maxsize=queue_size)
     model = 'yolo11'
     camera = Camera(source=source,
                     queue=q_pre,
-                    onnx=POST_ONNX)
+                    )
     device = RK3588(model, camera)
     post_processes = PostProcess(queue=device._neuro.net.inference.q_out,
                                  cfg=rknn_postprocess_cfg,
-                                 onnx=POST_ONNX)
-    visualizer = Visualizer(onnx=POST_ONNX)
+                                 )
+    visualizer = Visualizer()
     try:
         run(device, visualizer, post_processes)
     except Exception as e:
