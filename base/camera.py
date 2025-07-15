@@ -32,7 +32,7 @@ class Camera(Process):
 
     """
 
-    def __init__(self, source: int, queue, onnx=True, gt_queue=None):
+    def __init__(self, source: int, queue, INPUT_SIZE=640, gt_queue=None):
         """
         Parameters
         ----------
@@ -45,7 +45,6 @@ class Camera(Process):
             Whether to use ONNX model for postprocessing. Defaults to True.
         """
         super().__init__(group=None, target=None, name=None, args=(), kwargs={}, daemon=True)
-        INPUT_SIZE = (550 if onnx else 544)
         self.net_size = (INPUT_SIZE, INPUT_SIZE) 
         self._queue = queue
         self._gt_queue = gt_queue
@@ -91,9 +90,8 @@ class Camera(Process):
         resize_frame or crop_frame.
         '''
         for raw_frame in self.frames:
-            frame = self.resize_frame(raw_frame, self.net_size) #cv2.resize(raw_frame.copy(), self.net_size)
+            frame = self.resize_frame(raw_frame, self.net_size)
             frame = np.expand_dims(frame, axis=0)
-            print('frame.shape', frame.shape)
             #frame = self.crop_frame(raw_frame, self.net_size)
             if (not self._queue.empty() and type(self.source) == int):
                 continue
