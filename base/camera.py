@@ -70,33 +70,79 @@ class Camera(Process):
         finally:
             cap.release()
     
+    @staticmethod
+    def letterbox(
+        im,
+        new_shape=(640, 640),
+        color=(114, 114, 114),
+        auto=True,
+        scaleup=True,
+        stride=32,
+    ) -> tuple[np.ndarray, float, tuple[float, float]]:
+
+        shape = im.shape[:2]  # current shape [height, width]
+        if isinstance(new_shape, int):
+            new_shape = (new_shape, new_shape)
+
+        # Scale ratio (new / old)
+        print('shape[0], shape[1]', shape[0], shape[1])
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+        if not scaleup:  # only scale down, do not scale up (for better val mAP)
+            r = min(r, 1.0)
+
+        # Compute padding
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+
+        if auto:  # minimum rectangle
+            dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+
+        dw /= 2  # divide padding into 2 sides
+        dh /= 2
+
+        if shape[::-1] != new_unpad:  # resize
+            im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        im = cv2.copyMakeBorder(
+            im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color
+        )  # add border
+        return im
+    
     def get_frame(self):
         """It yields the frame, making it available for further processing outside the function.
         """
         return next(self.frames)
-    
-    def resize_frame(self, frame, net_size):
+
+    def resize_frame(self, frame, net_size=(1920, 1080)):
+        '''
+            useless if frame.shape == (1080, 1920)
+        '''
         frame_size = frame.shape[:2]
         interpolation = cv2.INTER_CUBIC if any(x < y for x, y in zip(frame_size, net_size)) else cv2.INTER_AREA
         return cv2.resize(frame, net_size, interpolation=interpolation)
-
-    def crop_frame(self, frame, net_size):
-        net_size = net_size[0]
-        hc, wc = frame.shape[0] // 2, frame.shape[1] // 2
-        h0, w0 = hc - (net_size // 2), wc - (net_size // 2)
-        assert (h0 >= 0 and w0 >= 0), 'The image size is not suitable to crop. Try Camera.resize_frame()'
-        return frame[h0:h0+net_size, w0:w0+net_size]
+    
+    def crop_frame(self, frame):
+        crop1 = frame[:540, 0:640, :]
+        crop2 = frame[:540, 640:1280, :]
+        crop3 = frame[:540, 1280:, :]
+        crop4 = frame[540:, 0:640, :]
+        crop5 = frame[540:, 640:1280, :]
+        crop6 = frame[540:, 1280:, :]
+        return [crop1, crop2, crop3, crop4, crop5, crop6]
 
     def run(self):
         '''When processing a raw frame, there are two methods to choose from:
         resize_frame or crop_frame.
         '''
         for raw_frame in self.frames:
-            frame = self.resize_frame(raw_frame, self.net_size) #cv2.resize(raw_frame.copy(), self.net_size)
-            #frame = self.crop_frame(raw_frame, self.net_size)
+            frame = self.resize_frame(raw_frame) # useless function
+            frames = self.crop_frame(frame)
+            frames = [self.letterbox(crop, new_shape=(640, 640), auto=False) for crop in frames]
+            frames = [np.expand_dims(crop, axis=0) for crop in frames]
             if (not self._queue.empty() and type(self.source) == int):
                 continue
-            self._queue.put((frame))
+            self._queue.put((np.concat(frames)))
 
 
 COCO_LABEL_MAP = {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
