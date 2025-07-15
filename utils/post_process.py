@@ -1,7 +1,7 @@
 import torch
 import cv2
 import numpy as np
-from coco_utils import COCO_test_helper
+from utils.coco_utils import COCO_test_helper
 from multiprocessing import Process, Queue
 
 
