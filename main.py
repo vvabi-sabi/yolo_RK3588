@@ -43,5 +43,5 @@ def main(source):
 
 
 if __name__ == "__main__":
-    camera_source = 11 # '/home/firefly/11.mp4'
+    camera_source = 0 # '/home/firefly/11.mp4'
     main(camera_source)
